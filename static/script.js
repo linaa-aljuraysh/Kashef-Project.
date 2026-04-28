@@ -12,10 +12,12 @@ const firebaseConfig = {
     measurementId: "G-FNZDMDBQ1E"
 };
 
-// تهيئة الفايربيس باستخدام النسخة المتوافقة (Compat)
-firebase.initializeApp(firebaseConfig);
+// Initialize Firebase
+if (!firebase.apps.length) {
+    firebase.initializeApp(firebaseConfig);
+}
 const auth = firebase.auth();
-const rtdb = firebase.database(); // استخدام Realtime Database
+const rtdb = firebase.database();
 
 let currentUser = null;
 let priceChartInstance = null;
@@ -27,6 +29,11 @@ function showPage(id) {
     document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
     document.getElementById(id + "-page").classList.add("active");
     window.scrollTo(0,0);
+
+    // Load user data if navigating to dashboard
+    if (id === 'dashboard' && currentUser) {
+        loadUserData();
+    }
 }
 
 function toggleLoading(show) {
@@ -34,76 +41,15 @@ function toggleLoading(show) {
 }
 
 // ==========================================
-// 3. Search & Products Logic (RTDB Integration)
-// ==========================================
-async function performSearch() {
-    const query = document.getElementById("search-input").value.trim().toLowerCase();
-    const productList = document.getElementById("product-list");
-
-    if (!query) {
-        Swal.fire('Note', 'Please enter a product name.', 'info');
-        return;
-    }
-
-    toggleLoading(true);
-    productList.innerHTML = "";
-
-    try {
-        // جلب البيانات من Realtime Database من مسار products
-        const snapshot = await rtdb.ref("products").once("value");
-        const products = snapshot.val();
-        let found = false;
-
-        if (products) {
-            Object.keys(products).forEach(key => {
-                const product = products[key];
-
-                // البحث باستخدام الحقل title بناءً على بياناتكم الحقيقية
-                if (product.title && product.title.toLowerCase().includes(query)) {
-                    found = true;
-                    productList.innerHTML += `
-                    <div class="team-card">
-                        <h3 style="font-size: 1.1rem; margin-bottom: 10px;">${product.title}</h3>
-                        <p style="font-size: 1.5rem; font-weight: bold; color: var(--primary); margin: 0;">${product.price} SAR</p>
-                        <p style="color: #6b7280; font-size: 0.9rem;">Store: <strong>${product.source}</strong></p>
-                        <div class="card-actions">
-                            <a href="${product.link}" target="_blank" class="action-btn btn-store"><i class="fa-solid fa-cart-shopping"></i> View Store</a>
-                            <button onclick="showPriceHistory('${product.title.replace(/'/g, "\\'")}')" class="action-btn btn-history"><i class="fa-solid fa-chart-line"></i> Price History</button>
-                            <button onclick="addToWatchlist('${product.title.replace(/'/g, "\\'")}', ${product.price})" class="action-btn" style="background:var(--primary); color:white;"><i class="fa-solid fa-heart"></i> Add to Watchlist</button>
-                        </div>
-                    </div>`;
-                }
-            });
-        }
-
-        if (!found) {
-            productList.innerHTML = `
-            <div class="empty-state" style="grid-column: 1/-1;">
-                <i class="fa-solid fa-box-open"></i>
-                <p>No products found for "<strong>${query}</strong>".</p>
-            </div>`;
-        }
-
-        if (currentUser) await addToHistory(query);
-        showPage("results");
-
-    } catch (error) {
-        console.error("Search Error:", error);
-        Swal.fire('Error', 'Failed to fetch data from Realtime Database.', 'error');
-    } finally {
-        toggleLoading(false);
-    }
-}
-
-// ==========================================
-// 4. Authentication Logic
+// 3. Authentication Logic (RESTORED)
 // ==========================================
 auth.onAuthStateChanged(user => {
     currentUser = user;
     if (user) {
-        document.getElementById("welcome-text").innerText = `Welcome back!`;
-        loadHistory();
-        loadWatchlist();
+        document.getElementById("welcome-text").innerText = "Welcome back!";
+        loadUserData();
+    } else {
+        document.getElementById("welcome-text").innerText = "Discover the best prices today";
     }
 });
 
@@ -146,7 +92,7 @@ async function handleSignUp(e) {
 
 async function logout() {
     await auth.signOut();
-    Swal.fire('Logged out', 'You have been logged out.', 'info');
+    Swal.fire('Logged out', 'You have been successfully logged out.', 'info');
     showPage('home');
 }
 
@@ -165,124 +111,8 @@ async function forgotPassword() {
 }
 
 // ==========================================
-// 5. Dashboard Logic (History & Watchlist)
+// 4. Search Logic (Amazon & Noon Integration)
 // ==========================================
-async function addToHistory(term) {
-    if(!currentUser) return;
-    await rtdb.ref("users/" + currentUser.uid + "/history").push({
-        term,
-        timestamp: firebase.database.ServerValue.TIMESTAMP
-    });
-}
-
-async function loadHistory() {
-    if(!currentUser) return;
-    const ref = rtdb.ref("users/" + currentUser.uid + "/history").limitToLast(6);
-    ref.once("value", snapshot => {
-        const box = document.getElementById("search-history");
-        box.innerHTML = "";
-        const data = snapshot.val();
-        if (!data) {
-            box.innerHTML = "<p>No recent searches.</p>";
-            return;
-        }
-        Object.keys(data).reverse().forEach(key => {
-            box.innerHTML += `<span class="history-item" onclick="document.getElementById('search-input').value='${data[key].term}'; performSearch();"><i class="fa fa-history"></i> ${data[key].term}</span>`;
-        });
-    });
-}
-
-async function clearHistory() {
-    if(!currentUser) return;
-    try {
-        await rtdb.ref("users/" + currentUser.uid + "/history").remove();
-        document.getElementById("search-history").innerHTML = "<p>History cleared.</p>";
-        Swal.fire('Cleared', 'Your search history has been cleared.', 'success');
-    } catch(err) { console.error(err); }
-}
-
-async function addToWatchlist(title, price) {
-    if(!currentUser) {
-        Swal.fire({
-            title: 'Login Required',
-            text: 'Please login to add items to your watchlist.',
-            icon: 'warning',
-            showCancelButton: true,
-            confirmButtonText: 'Go to Login'
-        }).then((result) => { if (result.isConfirmed) showPage('login'); });
-        return;
-    }
-    try {
-        await rtdb.ref("users/" + currentUser.uid + "/watchlist").push({
-            title: title,
-            price: price,
-            timestamp: firebase.database.ServerValue.TIMESTAMP
-        });
-        Swal.fire('Added!', 'Product added to your watchlist.', 'success');
-        loadWatchlist();
-    } catch(err) { Swal.fire('Error', err.message, 'error'); }
-}
-
-async function loadWatchlist() {
-    if(!currentUser) return;
-    rtdb.ref("users/" + currentUser.uid + "/watchlist").on("value", snapshot => {
-        const box = document.getElementById("watchlist");
-        box.innerHTML = "";
-        const data = snapshot.val();
-        if(!data) {
-            box.innerHTML = "<p>Your watchlist is empty.</p>";
-            return;
-        }
-        Object.keys(data).forEach(key => {
-            const item = data[key];
-            box.innerHTML += `
-            <div class="wish-item">
-                <div style="flex:1;">
-                    <strong style="display:block; margin-bottom:5px;">${item.title}</strong>
-                    <span style="color:var(--primary); font-weight:bold;">${item.price} SAR</span>
-                </div>
-                <button onclick="removeFromWatchlist('${key}')" style="background:none; border:none; color:#ef4444; font-size:1.2rem; cursor:pointer;"><i class="fa-solid fa-trash-can"></i></button>
-            </div>`;
-        });
-    });
-}
-
-async function removeFromWatchlist(key) {
-    try {
-        await rtdb.ref("users/" + currentUser.uid + "/watchlist/" + key).remove();
-    } catch(err) { console.error(err); }
-}
-
-// ==========================================
-// 6. Chart Logic
-// ==========================================
-function showPriceHistory(name) {
-    document.getElementById('history-modal').style.display = 'flex';
-    document.getElementById('modal-product-title').innerText = "Price History: " + name;
-
-    const ctx = document.getElementById('priceChart').getContext('2d');
-    if (priceChartInstance) priceChartInstance.destroy();
-
-    priceChartInstance = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: ['Jan', 'Feb', 'Mar', 'Apr'],
-            datasets: [{
-                label: 'Price in SAR',
-                data: [3500, 3400, 3450, 3300],
-                borderColor: '#10b981',
-                backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                fill: true,
-                tension: 0.3
-            }]
-        }
-    });
-}
-
-function closeModal() {
-    document.getElementById('history-modal').style.display = 'none';
-}
-
 async function performSearch() {
     const query = document.getElementById("search-input").value.trim().toLowerCase();
     const productList = document.getElementById("product-list");
@@ -296,7 +126,7 @@ async function performSearch() {
     productList.innerHTML = "";
 
     try {
-        // 1. جلب بيانات أمازون ونون في نفس الوقت
+        // Fetch from both Amazon and Noon
         const [amazonSnap, noonSnap] = await Promise.all([
             rtdb.ref("amazon-products").once("value"),
             rtdb.ref("noon-products").once("value")
@@ -305,19 +135,13 @@ async function performSearch() {
         const amazonData = amazonSnap.val() || {};
         const noonData = noonSnap.val() || {};
 
-        // 2. دمج البيانات في مصفوفة واحدة
-        const allProducts = [
-            ...Object.values(amazonData),
-            ...Object.values(noonData)
-        ];
-
-        console.log("Total products loaded:", allProducts.length);
+        const allProducts = [];
+        Object.keys(amazonData).forEach(id => allProducts.push({ id, ...amazonData[id] }));
+        Object.keys(noonData).forEach(id => allProducts.push({ id, ...noonData[id] }));
 
         let found = false;
 
-        // 3. البحث في كل المنتجات المدمجة
         allProducts.forEach(product => {
-            // البحث في العنوان (title)
             if (product.title && product.title.toLowerCase().includes(query)) {
                 found = true;
                 productList.innerHTML += `
@@ -327,22 +151,147 @@ async function performSearch() {
                     <p style="color: #6b7280; font-size: 0.9rem;">Store: <strong>${product.source}</strong></p>
                     <div class="card-actions">
                         <a href="${product.link}" target="_blank" class="action-btn btn-store"><i class="fa-solid fa-cart-shopping"></i> View Store</a>
-                        <button onclick="showPriceHistory('${product.title.replace(/'/g, "\\'")}')" class="action-btn btn-history">Price History</button>
+                        <button onclick="showPriceHistory('${product.id}', '${product.title.replace(/'/g, "\\'")}')" class="action-btn btn-history">
+                            <i class="fa-solid fa-chart-line"></i> History
+                        </button>
+                        <button onclick="addToWatchlist('${product.title.replace(/'/g, "\\'")}', ${product.price}, '${product.link}')" class="action-btn" style="background:var(--primary); color:white;">
+                            <i class="fa-solid fa-heart"></i> Add
+                        </button>
                     </div>
                 </div>`;
             }
         });
 
         if (!found) {
-            productList.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;"><p>No products found for "<strong>${query}</strong>".</p></div>`;
+            productList.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;"><p>No products found matching "<strong>${query}</strong>".</p></div>`;
         }
 
+        if (currentUser) await addToHistory(query);
         showPage("results");
 
     } catch (error) {
         console.error("Search Error:", error);
-        Swal.fire('Error', 'Failed to connect to Firebase. Try using a Mobile Hotspot.', 'error');
+        Swal.fire('Error', 'Failed to connect to the database.', 'error');
     } finally {
         toggleLoading(false);
     }
+}
+
+// ==========================================
+// 5. Price History Logic
+// ==========================================
+async function showPriceHistory(productId, productName) {
+    document.getElementById('history-modal').style.display = 'flex';
+    document.getElementById('modal-product-title').innerText = "Price Trend: " + productName;
+
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    if (priceChartInstance) priceChartInstance.destroy();
+
+    try {
+        const snapshot = await rtdb.ref(`price_history/${productId}`).once("value");
+        const historyData = snapshot.val();
+
+        let labels = [];
+        let prices = [];
+
+        if (historyData) {
+            labels = Object.keys(historyData);
+            prices = Object.values(historyData);
+        } else {
+            labels = ['Today'];
+            prices = [0];
+        }
+
+        priceChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Price (SAR)',
+                    data: prices,
+                    borderColor: '#10b981',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    fill: true,
+                    tension: 0.3
+                }]
+            }
+        });
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+function closeModal() {
+    document.getElementById('history-modal').style.display = 'none';
+}
+
+// ==========================================
+// 6. User Features (Watchlist & History)
+// ==========================================
+async function addToWatchlist(title, price, link) {
+    if (!currentUser) {
+        Swal.fire('Note', 'Please login first to add products to your watchlist.', 'warning');
+        return;
+    }
+    try {
+        await rtdb.ref(`users/${currentUser.uid}/watchlist`).push({
+            title, price, link, timestamp: firebase.database.ServerValue.TIMESTAMP
+        });
+        Swal.fire('Added', 'Product added to your watchlist successfully.', 'success');
+        loadUserData(); // Refresh the list instantly
+    } catch (e) {
+        console.error(e);
+        Swal.fire('Error', 'Failed to add product.', 'error');
+    }
+}
+
+async function addToHistory(term) {
+    if (!currentUser) return;
+    try {
+        await rtdb.ref(`users/${currentUser.uid}/history`).push({
+            term, timestamp: firebase.database.ServerValue.TIMESTAMP
+        });
+    } catch (e) {
+        console.error("Error saving history:", e);
+    }
+}
+
+function loadUserData() {
+    if (!currentUser) return;
+
+    // Load Watchlist
+    rtdb.ref(`users/${currentUser.uid}/watchlist`).on('value', snapshot => {
+        const box = document.getElementById("watchlist");
+        box.innerHTML = "";
+        const data = snapshot.val();
+        if (data) {
+            Object.keys(data).forEach(key => {
+                const item = data[key];
+                box.innerHTML += `
+                <div class="wish-item" style="display:flex; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px solid #eee;">
+                    <div>
+                        <strong>${item.title}</strong><br>
+                        <span style="color:var(--primary); font-weight:bold;">${item.price} SAR</span>
+                    </div>
+                    <a href="${item.link}" target="_blank" class="action-btn btn-store" style="padding:5px 10px; text-decoration:none;">Shop Now</a>
+                </div>`;
+            });
+        } else {
+            box.innerHTML = "<p>Your watchlist is empty.</p>";
+        }
+    });
+
+    // Load Search History
+    rtdb.ref(`users/${currentUser.uid}/history`).limitToLast(5).once('value', snapshot => {
+        const box = document.getElementById("search-history");
+        box.innerHTML = "";
+        const data = snapshot.val();
+        if (data) {
+            Object.values(data).reverse().forEach(item => {
+                box.innerHTML += `<span class="history-item" style="cursor:pointer;" onclick="document.getElementById('search-input').value='${item.term}'; performSearch();"><i class="fa fa-history"></i> ${item.term}</span>`;
+            });
+        } else {
+            box.innerHTML = "<p>No recent searches.</p>";
+        }
+    });
 }
